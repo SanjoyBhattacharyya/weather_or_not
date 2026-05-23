@@ -9,7 +9,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import kotlin.math.cos
 import kotlin.math.sin
@@ -18,128 +17,80 @@ import kotlin.random.Random
 /**
  * Animated Dynamic Weather Background component.
  *
- * This system renders an immersive, high-performance particle-based background
- * corresponding to the current time of day and WMO weather conditions.
- *
- * Supported Scenes:
- *  - Rain & Thunderstorms (with dynamic wind drift and optional thunder light-flashes)
- *  - Snowy / Winter fall (with horizontal drift sway/swimming patterns)
- *  - Overcast & Cloud drifts (large smooth semi-transparent floating cloud shapes)
- *  - Sunny / Radiant Sky (glowing warm core with slow-rotating geometric solar rays)
- *  - Moonlit Twinkling Night (star field with random individual twinkle rates, crescent moon & occasional shooting stars)
- *
- * Extension & Extension Points:
- *  - To add a new weather effect (e.g. Tornado, Sandstorm):
- *    1. Create a data representation class (e.g. DustParticle).
- *    2. Add status variables to the game loop.
- *    3. In the Canvas update list, draw the points and update positions.
+ * Designed securely to run at high frames-per-second without causing memory leak
+ * or main thread lockups/deadlocks. It strictly separates animation ticker cycles
+ * from Compose state writes: state mutations are kept in pure standard objects (non-State),
+ * and only the animation frame triggers draw pass evaluations.
  */
 
-// Data classes for particle systems
-data class Raindrop(
+// Simple data classes with mutable coordinates for manual UI rendering loops
+class RaindropData(
     var x: Float,
     var y: Float,
-    var length: Float,
-    var speed: Float,
-    var alpha: Float,
-    var width: Float
+    val length: Float,
+    val speed: Float,
+    val alpha: Float,
+    val width: Float
 )
 
-data class Snowflake(
+class SnowflakeData(
     var x: Float,
     var y: Float,
-    var radius: Float,
-    var speed: Float,
+    val radius: Float,
+    val speed: Float,
     var angle: Float,
-    var angleSpeed: Float,
-    var alpha: Float
+    val angleSpeed: Float,
+    val alpha: Float
 )
 
-data class Star(
+class StarData(
+    val x: Float,
+    val y: Float,
+    val size: Float,
+    val alpha: Float,
+    val twinkleSpeed: Float,
+    val twinkleOffset: Float
+)
+
+class FloatingCloudData(
     var x: Float,
-    var y: Float,
-    var size: Float,
-    var alpha: Float,
-    var twinkleSpeed: Float,
-    var twinkleOffset: Float
+    val y: Float,
+    val scale: Float,
+    val speed: Float,
+    val alpha: Float
 )
 
-data class FloatingCloud(
-    var x: Float,
-    var y: Float,
-    var scale: Float,
-    var speed: Float,
-    var alpha: Float
+class ShootingStarData(
+    var x: Float = 0f,
+    var y: Float = 0f,
+    var targetX: Float = 0f,
+    var targetY: Float = 0f,
+    var progress: Float = -1f,
+    var speed: Float = 0f,
+    var active: Boolean = false
 )
 
-data class ShootingStar(
-    var x: Float,
-    var y: Float,
-    var targetX: Float,
-    var targetY: Float,
-    var progress: Float, // 0.0 to 1.0
-    var speed: Float,
-    var active: Boolean
-)
+// Non-reactive memory state class to hold rendering assets securely
+class ParticleStateHolder(val random: Random = Random(System.currentTimeMillis())) {
+    val raindrops = ArrayList<RaindropData>()
+    val snowflakes = ArrayList<SnowflakeData>()
+    val stars = ArrayList<StarData>()
+    val clouds = ArrayList<FloatingCloudData>()
+    var shootingStar = ShootingStarData()
 
-@Composable
-fun DynamicWeatherBackground(
-    currentTheme: String,
-    weatherCode: Int,
-    isNight: Boolean,
-    modifier: Modifier = Modifier
-) {
-    // If we're not using the Animated theme, render a clean fallback or don't render animations to save battery.
-    if (currentTheme != "Animated") {
-        return
-    }
+    var initializedWidth = -1f
+    var initializedHeight = -1f
 
-    // Determine the active weather type
-    val isRainy = weatherCode in listOf(51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99)
-    val isSnowy = weatherCode in listOf(71, 73, 75, 77, 85, 86)
-    val isCloudy = weatherCode in listOf(2, 3, 45, 48)
-    val isThunderstorm = weatherCode in listOf(95, 96, 99)
-
-    // Game loop tick count using animation state
-    val infiniteTransition = rememberInfiniteTransition(label = "weather_ticks")
-    val frameCount by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1000f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(10000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "frame_generator"
-    )
-
-    // Keep state lists for particles initialized on demand
-    val raindrops = remember { mutableStateListOf<Raindrop>() }
-    val snowflakes = remember { mutableStateListOf<Snowflake>() }
-    val stars = remember { mutableStateListOf<Star>() }
-    val clouds = remember { mutableStateListOf<FloatingCloud>() }
-    var shootingStar by remember { mutableStateOf(ShootingStar(0f, 0f, 0f, 0f, -1f, 0f, false)) }
-
-    // Thunder flash trigger count & state
-    var thunderFlashAlpha by remember { mutableStateOf(0f) }
-
-    // Soft rotation states for solar rays
-    var sunRotationAngle by remember { mutableStateOf(0f) }
-
-    // Re-initialize particles when viewport size changes or when scene type switches
-    var canvasSizeWidth by remember { mutableStateOf(1080f) }
-    var canvasSizeHeight by remember { mutableStateOf(1920f) }
-
-    val random = remember { Random(System.currentTimeMillis()) }
-
-    fun reinitializeParticles(width: Float, height: Float) {
-        canvasSizeWidth = width
-        canvasSizeHeight = height
+    fun initialize(width: Float, height: Float) {
+        if (width <= 0f || height <= 0f) return
+        initializedWidth = width
+        initializedHeight = height
 
         // 1. Raindrops Setup
         raindrops.clear()
         for (i in 0 until 60) {
             raindrops.add(
-                Raindrop(
+                RaindropData(
                     x = random.nextFloat() * width,
                     y = random.nextFloat() * height,
                     length = 25f + random.nextFloat() * 20f,
@@ -154,7 +105,7 @@ fun DynamicWeatherBackground(
         snowflakes.clear()
         for (i in 0 until 50) {
             snowflakes.add(
-                Snowflake(
+                SnowflakeData(
                     x = random.nextFloat() * width,
                     y = random.nextFloat() * height,
                     radius = 4f + random.nextFloat() * 7f,
@@ -170,12 +121,12 @@ fun DynamicWeatherBackground(
         stars.clear()
         for (i in 0 until 45) {
             stars.add(
-                Star(
+                StarData(
                     x = random.nextFloat() * width,
-                    y = random.nextFloat() * height * 0.65f, // Mostly top part
+                    y = random.nextFloat() * height * 0.65f,
                     size = 1.5f + random.nextFloat() * 2.5f,
                     alpha = 0.1f + random.nextFloat() * 0.8f,
-                    twinkleSpeed = 0.05f + random.nextFloat() * 0.08f,
+                    twinkleSpeed = 0.03f + random.nextFloat() * 0.05f,
                     twinkleOffset = random.nextFloat() * 100f
                 )
             )
@@ -185,7 +136,7 @@ fun DynamicWeatherBackground(
         clouds.clear()
         for (i in 0 until 4) {
             clouds.add(
-                FloatingCloud(
+                FloatingCloudData(
                     x = random.nextFloat() * width - 150f,
                     y = 100f + random.nextFloat() * height * 0.35f,
                     scale = 0.7f + random.nextFloat() * 0.8f,
@@ -195,213 +146,235 @@ fun DynamicWeatherBackground(
             )
         }
     }
+}
 
-    // Initialize/sync on first layout sizing
-    LaunchedEffect(Unit) {
-        reinitializeParticles(1080f, 1920f)
+@Composable
+fun DynamicWeatherBackground(
+    currentTheme: String,
+    weatherCode: Int,
+    isNight: Boolean,
+    modifier: Modifier = Modifier
+) {
+    // Render only when dynamic theme mode is selected to conserve processor battery resources
+    if (currentTheme != "Animated") {
+        return
     }
 
-    // Periodic lightning flash generator inside a Thunderstorm
-    if (isThunderstorm && !isNight) {
-        LaunchedEffect(frameCount) {
-            if (random.nextFloat() < 0.015f) {
-                // Flash 1
-                thunderFlashAlpha = 0.7f
+    // Classify weather states from official WMO code list
+    val isRainy = weatherCode in listOf(51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99)
+    val isSnowy = weatherCode in listOf(71, 73, 75, 77, 85, 86)
+    val isCloudy = weatherCode in listOf(2, 3, 45, 48)
+    val isThunderstorm = weatherCode in listOf(95, 96, 99)
+
+    // Infinite cyclic frame counter used purely to force regular surface redraw ticks
+    val infiniteTransition = rememberInfiniteTransition(label = "background_frame_ticks")
+    val frameCount by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 10000f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(120000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "continuous_clock"
+    )
+
+    // Secure persistent game model storage container (recreated only on theme switches or cleanup)
+    val stateHolder = remember { ParticleStateHolder() }
+
+    // Coroutine managing thunderstorm overlay flash transitions safely
+    var thunderFlashAlpha by remember { mutableStateOf(0f) }
+    if (isThunderstorm) {
+        val rand = stateHolder.random
+        LaunchedEffect(isNight) {
+            while (true) {
+                // Occurs every 4 to 12 seconds
+                val nextDelay = 4000L + rand.nextInt(8000).toLong()
+                kotlinx.coroutines.delay(nextDelay)
+
+                // Render Strike Flash 1
+                thunderFlashAlpha = if (isNight) 0.45f else 0.65f
+                kotlinx.coroutines.delay(70)
+                thunderFlashAlpha = 0.0f
                 kotlinx.coroutines.delay(80)
-                thunderFlashAlpha = 0.0f
-                kotlinx.coroutines.delay(100)
-                // Double Flash
-                thunderFlashAlpha = 0.5f
-                kotlinx.coroutines.delay(60)
-                thunderFlashAlpha = 0f
+
+                // Instant secondary strike
+                if (rand.nextFloat() < 0.65f) {
+                    thunderFlashAlpha = if (isNight) 0.3f else 0.45f
+                    kotlinx.coroutines.delay(50)
+                    thunderFlashAlpha = 0.0f
+                }
             }
         }
-    } else if (isThunderstorm && isNight) {
-        LaunchedEffect(frameCount) {
-            if (random.nextFloat() < 0.012f) {
-                thunderFlashAlpha = 0.5f
-                kotlinx.coroutines.delay(120)
-                thunderFlashAlpha = 0.0f
-            }
-        }
+    } else {
+        thunderFlashAlpha = 0f
     }
 
-    // Slow sun turning rotation
-    LaunchedEffect(frameCount) {
-        sunRotationAngle = (sunRotationAngle + 0.15f) % 360f
-    }
+    // Sun rays rotation degrees directly derived from frameCount to prevent state loops
+    val sunRotationAngle = (frameCount * 0.15f) % 360f
 
     Box(modifier = modifier.fillMaxSize()) {
         Canvas(
-            modifier = Modifier
-                .fillMaxSize()
+            modifier = Modifier.fillMaxSize()
         ) {
             val width = size.width
             val height = size.height
 
-            // Detect if size has drastically changed (screen rot, fold, dynamic load)
-            if (width > 0 && height > 0 && (Math.abs(canvasSizeWidth - width) > 10f || Math.abs(canvasSizeHeight - height) > 10f)) {
-                reinitializeParticles(width, height)
+            // Screen resizing initialization check (perfectly safe because state is NOT a compose State)
+            if (width > 0 && height > 0 &&
+                (stateHolder.initializedWidth != width || stateHolder.initializedHeight != height)) {
+                stateHolder.initialize(width, height)
             }
 
-            // --- 1. RENDER STARS / MOON (Night Scene) ---
+            // --- 1. RENDER STARS & CRESCENT MOON (Night Theme Canopy) ---
             if (isNight) {
-                // Ensure array lists are non-empty
-                if (stars.isEmpty()) {
-                    reinitializeParticles(width, height)
+                // Ensure list elements are filled
+                if (stateHolder.stars.isEmpty()) {
+                    stateHolder.initialize(width, height)
                 }
 
-                // Draw stars
-                for (star in stars) {
-                    // Unique oscillating twinkle formula
+                // Render twinkling star fields
+                for (star in stateHolder.stars) {
+                    // Unique sine shift for beautiful individual twinkling
                     val oscillation = sin(frameCount * star.twinkleSpeed + star.twinkleOffset)
-                    val currentAlpha = (star.alpha + (oscillation * 0.4f)).coerceIn(0.1f, 1.0f)
+                    val starAlpha = (star.alpha + (oscillation * 0.42f)).coerceIn(0.12f, 1.0f)
 
                     drawCircle(
-                        color = Color.White.copy(alpha = currentAlpha),
+                        color = Color.White.copy(alpha = starAlpha),
                         radius = star.size,
                         center = Offset(star.x, star.y)
                     )
                 }
 
-                // Random periodic Shooting Star
-                if (!shootingStar.active && random.nextFloat() < 0.003f) {
-                    val sX = random.nextFloat() * width * 0.8f
-                    val sY = random.nextFloat() * height * 0.3f
-                    shootingStar = ShootingStar(
-                        x = sX,
-                        y = sY,
-                        targetX = sX + 250f + random.nextFloat() * 150f,
-                        targetY = sY + 150f + random.nextFloat() * 100f,
-                        progress = 0f,
-                        speed = 0.08f + random.nextFloat() * 0.06f,
-                        active = true
-                    )
+                // Manage shooting star trajectories on-demand
+                val sStar = stateHolder.shootingStar
+                val rand = stateHolder.random
+                if (!sStar.active && rand.nextFloat() < 0.002f) {
+                    val sX = rand.nextFloat() * width * 0.8f
+                    val sY = rand.nextFloat() * height * 0.35f
+                    sStar.x = sX
+                    sStar.y = sY
+                    sStar.targetX = sX + 220f + rand.nextFloat() * 180f
+                    sStar.targetY = sY + 130f + rand.nextFloat() * 100f
+                    sStar.progress = 0f
+                    sStar.speed = 0.06f + rand.nextFloat() * 0.06f
+                    sStar.active = true
                 }
 
-                if (shootingStar.active) {
-                    val nextProgress = shootingStar.progress + shootingStar.speed
-                    if (nextProgress >= 1f) {
-                        shootingStar = shootingStar.copy(active = false)
+                if (sStar.active) {
+                    sStar.progress += sStar.speed
+                    if (sStar.progress >= 1f) {
+                        sStar.active = false
                     } else {
-                        shootingStar = shootingStar.copy(progress = nextProgress)
-                        val currX = shootingStar.x + (shootingStar.targetX - shootingStar.x) * nextProgress
-                        val currY = shootingStar.y + (shootingStar.targetY - shootingStar.y) * nextProgress
-                        val startX = shootingStar.x + (shootingStar.targetX - shootingStar.x) * (nextProgress - 0.25f).coerceAtLeast(0f)
-                        val startY = shootingStar.y + (shootingStar.targetY - shootingStar.y) * (nextProgress - 0.25f).coerceAtLeast(0f)
+                        val currX = sStar.x + (sStar.targetX - sStar.x) * sStar.progress
+                        val currY = sStar.y + (sStar.targetY - sStar.y) * sStar.progress
+
+                        val tailProgress = (sStar.progress - 0.22f).coerceAtLeast(0f)
+                        val startX = sStar.x + (sStar.targetX - sStar.x) * tailProgress
+                        val startY = sStar.y + (sStar.targetY - sStar.y) * tailProgress
 
                         drawLine(
                             brush = Brush.linearGradient(
-                                colors = listOf(Color.Transparent, Color.White.copy(alpha = 0.8f)),
+                                colors = listOf(Color.Transparent, Color.White.copy(alpha = 0.75f)),
                                 start = Offset(startX, startY),
                                 end = Offset(currX, currY)
                             ),
                             start = Offset(startX, startY),
                             end = Offset(currX, currY),
-                            strokeWidth = 2.5f
+                            strokeWidth = 2.4f
                         )
                     }
                 }
 
-                // Render beautiful Glowing Crescent Moon at the top right
-                val moonCenterX = width * 0.82f
-                val moonCenterY = height * 0.12f
+                // Crescent Moon Glowing elements
+                val moonX = width * 0.82f
+                val moonY = height * 0.12f
                 val moonRadius = 45f
 
-                // Large soft moon halo
+                // Outer Moon Glow
                 drawCircle(
                     brush = Brush.radialGradient(
-                        colors = listOf(Color(0xFFFEF08A).copy(alpha = 0.18f), Color.Transparent),
-                        center = Offset(moonCenterX, moonCenterY),
+                        colors = listOf(Color(0xFFFEF08A).copy(alpha = 0.16f), Color.Transparent),
+                        center = Offset(moonX, moonY),
                         radius = moonRadius * 2.8f
                     ),
                     radius = moonRadius * 2.8f,
-                    center = Offset(moonCenterX, moonCenterY)
+                    center = Offset(moonX, moonY)
                 )
 
-                // Beautiful crisp yellow/white crescent moon using offset subtraction illusion
+                // Clear moon body
                 drawCircle(
                     color = Color(0xFFFEF3C7),
                     radius = moonRadius,
-                    center = Offset(moonCenterX, moonCenterY)
+                    center = Offset(moonX, moonY)
                 )
 
-                // Subtract shadow to form crescent
+                // Subtractive offset shadow circle to carve a sharp yellow crescent shape
                 drawCircle(
-                    color = if (isRainy) Color(0xFF1E1E2C) else Color(0xFF0B0E14), // blending to dark background
-                    radius = moonRadius * 0.95f,
-                    center = Offset(moonCenterX - moonRadius * 0.42f, moonCenterY - moonRadius * 0.15f)
+                    color = if (isRainy) Color(0xFF1E1E2C) else Color(0xFF0B0E14),
+                    radius = moonRadius * 0.94f,
+                    center = Offset(moonX - moonRadius * 0.44f, moonY - moonRadius * 0.16f)
                 )
             }
 
-            // --- 2. RENDER WARM GLOWING SUN (Day & Clear Scene) ---
+            // --- 2. RENDER SHINING SOLAR DISC (Day / Radiant Atmosphere) ---
             if (!isNight && !isRainy && !isCloudy && !isSnowy) {
-                val sunCenterX = width * 0.82f
-                val sunCenterY = height * 0.12f
+                val sunX = width * 0.82f
+                val sunY = height * 0.12f
                 val sunRadius = 55f
 
-                // Sun Halo Ambient glow (pulsing over time)
-                val pulseRatio = 1.0f + 0.12f * sin(frameCount * 0.04f)
+                // Pulsate glowing shell over time
+                val glowScaler = 1.0f + 0.12f * sin(frameCount * 0.05f)
                 drawCircle(
                     brush = Brush.radialGradient(
-                        colors = listOf(Color(0xFFFDBA74).copy(alpha = 0.25f), Color.Transparent),
-                        center = Offset(sunCenterX, sunCenterY),
-                        radius = sunRadius * 3.4f * pulseRatio
+                        colors = listOf(Color(0xFFFDBA74).copy(alpha = 0.24f), Color.Transparent),
+                        center = Offset(sunX, sunY),
+                        radius = sunRadius * 3.5f * glowScaler
                     ),
-                    radius = sunRadius * 3.4f * pulseRatio,
-                    center = Offset(sunCenterX, sunCenterY)
+                    radius = sunRadius * 3.5f * glowScaler,
+                    center = Offset(sunX, sunY)
                 )
 
-                // Inner yellow core
+                // Inner core
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(Color(0xFFFEF08A), Color(0xFFF97316)),
-                        center = Offset(sunCenterX, sunCenterY),
+                        center = Offset(sunX, sunY),
                         radius = sunRadius
                     ),
                     radius = sunRadius,
-                    center = Offset(sunCenterX, sunCenterY)
+                    center = Offset(sunX, sunY)
                 )
 
-                // Dynamic rotating crown rays
-                rotate(degrees = sunRotationAngle, pivot = Offset(sunCenterX, sunCenterY)) {
+                // Sunshine rays rotating softly
+                rotate(degrees = sunRotationAngle, pivot = Offset(sunX, sunY)) {
                     val rayCount = 8
-                    val rayLength = sunRadius * 0.55f
+                    val rayLen = sunRadius * 0.55f
                     for (i in 0 until rayCount) {
                         val angleDeg = (i * 360f / rayCount)
                         val angleRad = Math.toRadians(angleDeg.toDouble()).toFloat()
-                        val startDistance = sunRadius * 1.2f
-                        val endDistance = startDistance + rayLength
-
-                        val start = Offset(
-                            x = sunCenterX + cos(angleRad) * startDistance,
-                            y = sunCenterY + sin(angleRad) * startDistance
-                        )
-                        val end = Offset(
-                            x = sunCenterX + cos(angleRad) * endDistance,
-                            y = sunCenterY + sin(angleRad) * endDistance
-                        )
+                        val startRadDist = sunRadius * 1.25f
+                        val endRadDist = startRadDist + rayLen
 
                         drawLine(
-                            color = Color(0xFFFDBA74).copy(alpha = 0.70f),
-                            start = start,
-                            end = end,
+                            color = Color(0xFFFDBA74).copy(alpha = 0.65f),
+                            start = Offset(sunX + cos(angleRad) * startRadDist, sunY + sin(angleRad) * startRadDist),
+                            end = Offset(sunX + cos(angleRad) * endRadDist, sunY + sin(angleRad) * endRadDist),
                             strokeWidth = 6f
                         )
                     }
                 }
             }
 
-            // --- 3. RENDER SLOWLY FLOATING OVERCAST CLOUDS (Cloudy Scene) ---
+            // --- 3. RENDER STRATUS OVERCAST & DRIFTS (Cloudy Layouts) ---
             if (isCloudy || isRainy || isSnowy) {
-                if (clouds.isEmpty()) {
-                    reinitializeParticles(width, height)
+                if (stateHolder.clouds.isEmpty()) {
+                    stateHolder.initialize(width, height)
                 }
 
-                for (cloud in clouds) {
-                    // Update cloud horizontal drifting
+                for (cloud in stateHolder.clouds) {
+                    // Update movement coordinate (perfectly safe inside draw loop because state is not a compose State)
                     cloud.x += cloud.speed
-                    if (cloud.x > width + 200f) {
+                    if (cloud.x > width + 220f) {
                         cloud.x = -250f
                     }
 
@@ -414,7 +387,6 @@ fun DynamicWeatherBackground(
                         radius = 160f * cloud.scale
                     )
 
-                    // Draw organic compound fluffly circles
                     drawCircle(
                         brush = cloudBrush,
                         radius = 160f * cloud.scale,
@@ -433,56 +405,52 @@ fun DynamicWeatherBackground(
                 }
             }
 
-            // --- 4. RENDER RAINDROPS PARTICLES (Rainy/Storm Scene) ---
+            // --- 4. RENDER PRECIPITATION STREAKS (Rain & Windy Showers) ---
             if (isRainy) {
-                if (raindrops.isEmpty()) {
-                    reinitializeParticles(width, height)
+                if (stateHolder.raindrops.isEmpty()) {
+                    stateHolder.initialize(width, height)
                 }
 
-                val tiltAngleX = 4f // Slanted rain effect mimicking dynamic breeze
-
-                for (drop in raindrops) {
-                    // Descend raindrop in space
+                val breezeTilt = 4f
+                for (drop in stateHolder.raindrops) {
+                    // Update raindrop coordinates (not using compose States, perfectly safe!)
                     drop.y += drop.speed
-                    drop.x += tiltAngleX * (drop.speed / 25f)
+                    drop.x += breezeTilt * (drop.speed / 25f)
 
-                    // Wrap-around boundary conditions
                     if (drop.y > height) {
                         drop.y = -drop.length
-                        drop.x = random.nextFloat() * width
+                        drop.x = stateHolder.random.nextFloat() * width
                     }
                     if (drop.x > width + 50f) {
                         drop.x = -30f
                     }
 
-                    // Render droplet streak
                     drawLine(
                         color = Color(0xFF60A5FA).copy(alpha = drop.alpha),
                         start = Offset(drop.x, drop.y),
-                        end = Offset(drop.x + tiltAngleX * (drop.length / 30f), drop.y + drop.length),
+                        end = Offset(drop.x + breezeTilt * (drop.length / 30f), drop.y + drop.length),
                         strokeWidth = drop.width
                     )
                 }
             }
 
-            // --- 5. RENDER SNOWFLAKES PARTICLES (Snowy Winter Scene) ---
+            // --- 5. RENDER FROST CRYSTALS (Winter Snowfall) ---
             if (isSnowy) {
-                if (snowflakes.isEmpty()) {
-                    reinitializeParticles(width, height)
+                if (stateHolder.snowflakes.isEmpty()) {
+                    stateHolder.initialize(width, height)
                 }
 
-                for (flake in snowflakes) {
-                    // Update horizontal sway values
+                for (flake in stateHolder.snowflakes) {
+                    // Fluttering angle fluctuations
                     flake.angle += flake.angleSpeed
                     flake.y += flake.speed
-                    flake.x += sin(flake.angle) * 1.1f // Horizontal wobble flight path
+                    flake.x += sin(flake.angle) * 1.1f
 
                     if (flake.y > height) {
                         flake.y = -15f
-                        flake.x = random.nextFloat() * width
+                        flake.x = stateHolder.random.nextFloat() * width
                     }
 
-                    // Beautiful snowy crystals
                     drawCircle(
                         color = Color.White.copy(alpha = flake.alpha),
                         radius = flake.radius,
@@ -491,7 +459,7 @@ fun DynamicWeatherBackground(
                 }
             }
 
-            // --- 6. RENDER THUNDERSTORM FLASH EFFECT ---
+            // --- 6. RENDER FLASH STRIP (Transient Storm Lightning overlay) ---
             if (thunderFlashAlpha > 0f) {
                 drawRect(
                     color = Color.White.copy(alpha = thunderFlashAlpha),
