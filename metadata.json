@@ -1,0 +1,7 @@
+{
+  "name": "Weather or Not",
+  "description": "You're going outside either way, but here's what to expect.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
