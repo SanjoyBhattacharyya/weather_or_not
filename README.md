@@ -1,4 +1,4 @@
-# 🌌 Weather & Plan Planner (Skyline Weather)
+# 🌌 Weather or Not (You are going out any way, here is what to expect. All in one place.)
 
 A modern, fluid, production-grade Android Weather & Planner application built with **Kotlin** and **Jetpack Compose**, styled to follow strictly **Material Design 3 (M3)** guidelines. 
 
@@ -146,7 +146,7 @@ Follow these direct steps in your browser window:
 ### Step 1: Connect & Push to GitHub
 1. Look at the upper-right or top-left sidebar options in your AI Studio Build workspace.
 2. Click the **Export** or **GitHub** integration button.
-3. Authenticate with your GitHub account, select your repository name (`SanjoyBhattacharyya/weatherornot`), and press **Push / Export**. All files (including your new dynamic background features and structural database configurations) will be committed immediately!
+3. Authenticate with your GitHub account, select your repository name (`SanjoyBhattacharyya/weather_or_not`), and press **Push / Export**. All files (including your new dynamic background features and structural database configurations) will be committed immediately!
 
 ### Step 2: Generate and Install your signed APK File
 1. In the top toolbar, click on the **Settings menu (⚙️)** or the **Build options drop-down** next to the active emulator stream.
